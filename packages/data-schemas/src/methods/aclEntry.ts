@@ -15,6 +15,7 @@ import type {
 import type { IAclEntry } from '~/types';
 import { tenantPartitionFilter } from '~/models/plugins/tenantIsolation';
 import { tenantSafeBulkWrite } from '~/utils/tenantBulkWrite';
+import { buildPrincipalFilters } from '~/utils/principal';
 import { MAX_PERM_BITS } from '~/common/permissions';
 import { getSafeErrorFields } from '~/utils/errors';
 import { RoleBits } from '~/common/enum';
@@ -259,13 +260,8 @@ export function createAclEntryMethods(mongoose: typeof import('mongoose')): {
     readPrimary?: boolean,
   ): Promise<IAclEntry[]> {
     const AclEntry = mongoose.models.AclEntry as Model<IAclEntry>;
-    const principalsQuery = principalsList.map((p) => ({
-      principalType: p.principalType,
-      ...(p.principalType !== PrincipalType.PUBLIC && { principalId: p.principalId }),
-    }));
-
     const query = AclEntry.find({
-      $or: principalsQuery,
+      $or: buildPrincipalFilters(principalsList),
       resourceType,
       resourceId,
     });
@@ -295,13 +291,8 @@ export function createAclEntryMethods(mongoose: typeof import('mongoose')): {
     permissionBit: number,
   ): Promise<boolean> {
     const AclEntry = mongoose.models.AclEntry as Model<IAclEntry>;
-    const principalsQuery = principalsList.map((p) => ({
-      principalType: p.principalType,
-      ...(p.principalType !== PrincipalType.PUBLIC && { principalId: p.principalId }),
-    }));
-
     const entry = await AclEntry.findOne({
-      $or: principalsQuery,
+      $or: buildPrincipalFilters(principalsList),
       resourceType,
       resourceId,
       permBits: { $in: permissionBitSupersets(permissionBit) },
@@ -366,14 +357,9 @@ export function createAclEntryMethods(mongoose: typeof import('mongoose')): {
     }
 
     const AclEntry = mongoose.models.AclEntry as Model<IAclEntry>;
-    const principalsQuery = principalsList.map((p) => ({
-      principalType: p.principalType,
-      ...(p.principalType !== PrincipalType.PUBLIC && { principalId: p.principalId }),
-    }));
-
     // Batch query for all resources at once
     const aclEntries = await AclEntry.find({
-      $or: principalsQuery,
+      $or: buildPrincipalFilters(principalsList),
       resourceType,
       resourceId: { $in: resourceIds },
     }).lean();
@@ -525,13 +511,8 @@ export function createAclEntryMethods(mongoose: typeof import('mongoose')): {
     readPrimary = false,
   ): Promise<Types.ObjectId[]> {
     const AclEntry = mongoose.models.AclEntry as Model<IAclEntry>;
-    const principalsQuery = principalsList.map((p) => ({
-      principalType: p.principalType,
-      ...(p.principalType !== PrincipalType.PUBLIC && { principalId: p.principalId }),
-    }));
-
     const query = AclEntry.find({
-      $or: principalsQuery,
+      $or: buildPrincipalFilters(principalsList),
       ...(resourceIds !== undefined && { resourceId: { $in: resourceIds } }),
       resourceType,
       permBits: { $in: permissionBitSupersets(requiredPermBit) },

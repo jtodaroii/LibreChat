@@ -2245,4 +2245,59 @@ describe('AclEntry Model Tests', () => {
       ).rejects.toThrow(mongoose.Error.ValidationError);
     });
   });
+
+  test('queries every group principal in one branch', async () => {
+    const groupIds = Array.from({ length: 300 }, () => new mongoose.Types.ObjectId());
+    const principals = [
+      { principalType: PrincipalType.USER, principalId: userId },
+      { principalType: PrincipalType.ROLE, principalId: 'USER' },
+      ...groupIds.map((principalId) => ({ principalType: PrincipalType.GROUP, principalId })),
+      { principalType: PrincipalType.PUBLIC },
+    ];
+    await methods.grantPermission(
+      PrincipalType.GROUP,
+      groupIds[150],
+      ResourceType.AGENT,
+      resourceId,
+      PermissionBits.VIEW,
+      grantedById,
+    );
+
+    const branchCounts: number[] = [];
+    mongoose.set('debug', (_collection: string, _method: string, ...args: unknown[]) => {
+      for (const arg of args) {
+        if (typeof arg === 'object' && arg !== null && '$or' in arg && Array.isArray(arg.$or)) {
+          branchCounts.push(arg.$or.length);
+        }
+      }
+    });
+    try {
+      expect(
+        await methods.hasPermission(
+          principals,
+          ResourceType.AGENT,
+          resourceId,
+          PermissionBits.VIEW,
+        ),
+      ).toBe(true);
+      expect(
+        await methods.findAccessibleResources(principals, ResourceType.AGENT, PermissionBits.VIEW),
+      ).toEqual([resourceId]);
+      const permissions = await methods.getEffectivePermissionsForResources(
+        principals,
+        ResourceType.AGENT,
+        [resourceId],
+      );
+      expect(permissions.get(resourceId.toString())).toBe(PermissionBits.VIEW);
+      const entries = await methods.findEntriesByPrincipalsAndResource(
+        principals,
+        ResourceType.AGENT,
+        resourceId,
+      );
+      expect(entries).toHaveLength(1);
+    } finally {
+      mongoose.set('debug', false);
+    }
+    expect(branchCounts).toEqual([4, 4, 4, 4]);
+  });
 });

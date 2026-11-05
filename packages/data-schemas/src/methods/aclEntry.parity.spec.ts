@@ -54,7 +54,7 @@ function idsToSortedStrings(ids: mongoose.Types.ObjectId[]): string[] {
 }
 
 function buildPrincipalsQuery(
-  principals: Array<{ principalType: string; principalId?: mongoose.Types.ObjectId }>,
+  principals: Array<{ principalType: string; principalId?: string | mongoose.Types.ObjectId }>,
 ) {
   return principals.map((p) => ({
     principalType: p.principalType,
@@ -405,5 +405,157 @@ describe('ACL $bitsAllSet vs $in parity (issue #12729)', () => {
       );
       expect(currentMs).toBeLessThan(Math.max(legacyMs * 5, 50));
     });
+  });
+});
+
+describe('grouped principal $in parity (issues #16918, #17517)', () => {
+  const userId = new mongoose.Types.ObjectId();
+  const grantedBy = new mongoose.Types.ObjectId();
+  const heldGroups = Array.from({ length: 112 }, () => new mongoose.Types.ObjectId());
+  const otherGroups = Array.from({ length: 20 }, () => new mongoose.Types.ObjectId());
+  const resourceIds = Array.from({ length: 273 }, () => new mongoose.Types.ObjectId());
+  const principalsList = [
+    { principalType: PrincipalType.USER, principalId: userId },
+    { principalType: PrincipalType.ROLE, principalId: 'USER' },
+    ...heldGroups.map((principalId) => ({ principalType: PrincipalType.GROUP, principalId })),
+    { principalType: PrincipalType.PUBLIC },
+  ];
+
+  /** Grantees cycle through held and unheld principals, including a held group id under the user type. */
+  const grantees: Array<Pick<t.IAclEntry, 'principalType' | 'principalId' | 'principalModel'>> = [
+    { principalType: PrincipalType.USER, principalId: userId, principalModel: PrincipalModel.USER },
+    {
+      principalType: PrincipalType.USER,
+      principalId: heldGroups[0],
+      principalModel: PrincipalModel.USER,
+    },
+    {
+      principalType: PrincipalType.GROUP,
+      principalId: userId,
+      principalModel: PrincipalModel.GROUP,
+    },
+    { principalType: PrincipalType.ROLE, principalId: 'USER', principalModel: PrincipalModel.ROLE },
+    {
+      principalType: PrincipalType.ROLE,
+      principalId: 'ADMIN',
+      principalModel: PrincipalModel.ROLE,
+    },
+    { principalType: PrincipalType.PUBLIC },
+    ...heldGroups.map((principalId) => ({
+      principalType: PrincipalType.GROUP,
+      principalId,
+      principalModel: PrincipalModel.GROUP,
+    })),
+    ...otherGroups.map((principalId) => ({
+      principalType: PrincipalType.GROUP,
+      principalId,
+      principalModel: PrincipalModel.GROUP,
+    })),
+  ];
+
+  beforeEach(async () => {
+    await AclEntry.insertMany(
+      Array.from({ length: 2000 }, (_, i) => ({
+        ...grantees[(i * 7) % grantees.length],
+        resourceType: ResourceType.AGENT,
+        resourceId: resourceIds[i % resourceIds.length],
+        permBits: (i * 13) % 32,
+        grantedBy,
+      })),
+    );
+  });
+
+  test('findAccessibleResources matches the per-principal $or', async () => {
+    const legacy = await AclEntry.find({
+      $or: buildPrincipalsQuery(principalsList),
+      resourceType: ResourceType.AGENT,
+      permBits: { $bitsAllSet: PermissionBits.VIEW },
+    }).distinct('resourceId');
+
+    const current = await methods.findAccessibleResources(
+      principalsList,
+      ResourceType.AGENT,
+      PermissionBits.VIEW,
+    );
+
+    expect(legacy.length).toBeGreaterThan(0);
+    expect(idsToSortedStrings(current)).toEqual(idsToSortedStrings(legacy));
+  });
+
+  test('getEffectivePermissionsForResources matches the per-principal $or', async () => {
+    const legacyEntries = await AclEntry.find({
+      $or: buildPrincipalsQuery(principalsList),
+      resourceType: ResourceType.AGENT,
+      resourceId: { $in: resourceIds },
+    }).lean();
+    const legacy = new Map<string, number>();
+    for (const entry of legacyEntries) {
+      const id = entry.resourceId.toString();
+      legacy.set(id, (legacy.get(id) ?? 0) | entry.permBits);
+    }
+
+    const current = await methods.getEffectivePermissionsForResources(
+      principalsList,
+      ResourceType.AGENT,
+      resourceIds,
+    );
+
+    expect(legacy.size).toBeGreaterThan(0);
+    expect(current).toEqual(legacy);
+  });
+
+  test('hasPermission matches the per-principal $or', async () => {
+    const decoyOnly = new mongoose.Types.ObjectId();
+    await AclEntry.insertMany(
+      grantees.slice(1, 3).map((grantee) => ({
+        ...grantee,
+        resourceType: ResourceType.AGENT,
+        resourceId: decoyOnly,
+        permBits: PermissionBits.VIEW | PermissionBits.EDIT,
+        grantedBy,
+      })),
+    );
+    const outcomes = new Set<boolean>();
+    for (const resourceId of [decoyOnly, ...resourceIds.slice(0, 40)]) {
+      for (const bit of [PermissionBits.VIEW, PermissionBits.EDIT]) {
+        const legacy = await AclEntry.exists({
+          $or: buildPrincipalsQuery(principalsList),
+          resourceType: ResourceType.AGENT,
+          resourceId,
+          permBits: { $bitsAllSet: bit },
+        });
+
+        const current = await methods.hasPermission(
+          principalsList,
+          ResourceType.AGENT,
+          resourceId,
+          bit,
+        );
+
+        expect(current).toBe(!!legacy);
+        outcomes.add(current);
+      }
+    }
+    expect(outcomes).toEqual(new Set([true, false]));
+  });
+
+  test('findEntriesByPrincipalsAndResource matches the per-principal $or', async () => {
+    for (const resourceId of resourceIds.slice(0, 20)) {
+      const legacy = await AclEntry.find({
+        $or: buildPrincipalsQuery(principalsList),
+        resourceType: ResourceType.AGENT,
+        resourceId,
+      }).distinct('_id');
+
+      const current = await methods.findEntriesByPrincipalsAndResource(
+        principalsList,
+        ResourceType.AGENT,
+        resourceId,
+      );
+
+      expect(idsToSortedStrings(current.map((entry) => entry._id))).toEqual(
+        idsToSortedStrings(legacy),
+      );
+    }
   });
 });

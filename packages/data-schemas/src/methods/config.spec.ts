@@ -345,6 +345,40 @@ describe('getApplicableConfigs', () => {
     expect(configs).toHaveLength(1);
   });
 
+  it('queries every group principal in one branch', async () => {
+    const groupIds = Array.from({ length: 300 }, () => new Types.ObjectId());
+    const sharedGroupId = groupIds[150].toString();
+    await methods.upsertConfig(PrincipalType.ROLE, '__base__', PrincipalModel.ROLE, {}, 0);
+    await methods.upsertConfig(PrincipalType.GROUP, sharedGroupId, PrincipalModel.GROUP, {}, 10);
+
+    const orLength = (clause: unknown): number[] =>
+      typeof clause === 'object' && clause !== null && '$or' in clause && Array.isArray(clause.$or)
+        ? [clause.$or.length]
+        : [];
+    const branchCounts: number[] = [];
+    mongoose.set('debug', (_collection: string, _method: string, filter: unknown) => {
+      const and =
+        typeof filter === 'object' &&
+        filter !== null &&
+        '$and' in filter &&
+        Array.isArray(filter.$and)
+          ? filter.$and
+          : [];
+      branchCounts.push(...orLength(filter), ...and.flatMap(orLength));
+    });
+    try {
+      const configs = await methods.getApplicableConfigs([
+        { principalType: PrincipalType.USER, principalId: new Types.ObjectId() },
+        { principalType: PrincipalType.ROLE, principalId: 'USER' },
+        ...groupIds.map((principalId) => ({ principalType: PrincipalType.GROUP, principalId })),
+      ]);
+      expect(configs.map((config) => config.principalId)).toEqual(['__base__', sharedGroupId]);
+    } finally {
+      mongoose.set('debug', false);
+    }
+    expect(Math.max(...branchCounts)).toBe(3);
+  });
+
   describe('tenant partition', () => {
     const USER_ROLE = [{ principalType: PrincipalType.ROLE, principalId: 'USER' }];
 

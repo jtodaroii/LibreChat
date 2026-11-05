@@ -1844,4 +1844,46 @@ describe('systemGrant methods', () => {
       expect(result).toBe(false);
     });
   });
+
+  it('queries every group principal in one branch', async () => {
+    const groupIds = Array.from({ length: 300 }, () => new Types.ObjectId());
+    const principals = [
+      { principalType: PrincipalType.USER, principalId: new Types.ObjectId() },
+      { principalType: PrincipalType.ROLE, principalId: SystemRoles.USER },
+      ...groupIds.map((principalId) => ({ principalType: PrincipalType.GROUP, principalId })),
+    ];
+    const capability = SystemCapabilities.READ_CONFIGS;
+    await methods.grantCapability({
+      principalType: PrincipalType.GROUP,
+      principalId: groupIds[150],
+      capability,
+    });
+
+    const orLength = (clause: unknown): number[] =>
+      typeof clause === 'object' && clause !== null && '$or' in clause && Array.isArray(clause.$or)
+        ? [clause.$or.length]
+        : [];
+    const branchCounts: number[] = [];
+    mongoose.set('debug', (_collection: string, _method: string, filter: unknown) => {
+      const and =
+        typeof filter === 'object' &&
+        filter !== null &&
+        '$and' in filter &&
+        Array.isArray(filter.$and)
+          ? filter.$and
+          : [];
+      branchCounts.push(...orLength(filter), ...and.flatMap(orLength));
+    });
+    try {
+      expect(await methods.hasCapabilityForPrincipals({ principals, capability })).toBe(true);
+      expect(await methods.getHeldCapabilities({ principals, capabilities: [capability] })).toEqual(
+        new Set([capability]),
+      );
+      expect(await methods.hasAnyConfigReadAccess({ principals })).toBe(true);
+      expect(await methods.getCapabilitiesForPrincipals({ principals })).toHaveLength(1);
+    } finally {
+      mongoose.set('debug', false);
+    }
+    expect(branchCounts).toEqual([3, 3, 3, 3]);
+  });
 });
