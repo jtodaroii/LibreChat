@@ -34,6 +34,7 @@ import {
   CONFIG_KEY_ENCODING_VERSION,
 } from './encoding';
 import { tenantPartitionFilter } from '~/models/plugins/tenantIsolation';
+import { buildPrincipalFilters } from '~/utils/principal';
 import { isFieldNameRejection } from '~/utils/fields';
 import logger from '~/config/winston';
 
@@ -226,7 +227,7 @@ export function createConfigStore(mongoose: typeof import('mongoose')): ConfigSt
     const documents = await model()
       .find({
         $and: [
-          { $or: principals.map(identityFilter) },
+          { $or: buildPrincipalFilters(principals) },
           tenantPartitionFilter('configStore.listActive'),
         ],
         isActive: true,
